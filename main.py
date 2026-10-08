@@ -3,6 +3,7 @@ import html
 import os
 import re
 from datetime import date, datetime, timedelta
+
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -36,7 +37,11 @@ import schedule_sync  # noqa: E402
 import weather as weather_mod  # noqa: E402
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+
+# Считываем список ID (поддерживает и OWNER_IDS, и OWNER_ID через запятую)
+raw_owner_ids = os.getenv("OWNER_IDS") or os.getenv("OWNER_ID", "")
+OWNER_IDS = [int(x.strip()) for x in raw_owner_ids.split(",") if x.strip().isdigit()]
+
 CITY = os.getenv("CITY", "Nanjing")
 TZ = ZoneInfo(os.getenv("TIMEZONE", "Asia/Shanghai"))
 DEFAULT_MORNING = os.getenv("MORNING_TIME", "07:00")
@@ -57,9 +62,11 @@ dp = Dispatcher()
 scheduler = AsyncIOScheduler(timezone=TZ)
 
 public = Router()  # /start доступен всем, чтобы узнать свой ID
-owner = Router()  # всё остальное только владельцу
-owner.message.filter(lambda m: OWNER_ID != 0 and m.from_user and m.from_user.id == OWNER_ID)
-owner.callback_query.filter(lambda c: OWNER_ID != 0 and c.from_user.id == OWNER_ID)
+owner = Router()  # всё остальное только владельцам
+
+# Фильтры доступа проверяют вхождение ID в список OWNER_IDS
+owner.message.filter(lambda m: bool(OWNER_IDS) and bool(m.from_user) and m.from_user.id in OWNER_IDS)
+owner.callback_query.filter(lambda c: bool(OWNER_IDS) and bool(c.from_user) and c.from_user.id in OWNER_IDS)
 
 
 def today() -> date:
@@ -68,6 +75,15 @@ def today() -> date:
 
 def esc(s) -> str:
     return html.escape(str(s))
+
+
+async def send_to_owners(text: str, reply_markup=None):
+    """Вспомогательная функция для безопасной рассылки сообщений всем владельцам."""
+    for owner_id in OWNER_IDS:
+        try:
+            await bot.send_message(owner_id, text, reply_markup=reply_markup)
+        except Exception as e:
+            print(f"[send_to_owners] Не удалось отправить сообщение для ID {owner_id}: {e}")
 
 
 # ---------- форматирование ----------
@@ -115,16 +131,15 @@ async def build_morning(day: date):
 async def send_morning():
     try:
         text, kb = await build_morning(today())
-        await bot.send_message(OWNER_ID, text, reply_markup=kb)
+        await send_to_owners(text, reply_markup=kb)
     except Exception as e:
         print(f"[morning] error: {e}")
-        await bot.send_message(OWNER_ID, f"⚠️ Не удалось собрать утреннее сообщение: {esc(e)}")
+        await send_to_owners(f"⚠️ Не удалось собрать утреннее сообщение: {esc(e)}")
 
 
 async def remind_schedule():
-    await bot.send_message(
-        OWNER_ID,
-        "📸 Воскресенье! Пришли фото или скриншот расписания на следующую неделю, и я его загружу.",
+    await send_to_owners(
+        "📸 Воскресенье! Пришли фото или скриншот расписания на следующую неделю, и я его загружу."
     )
 
 
@@ -141,16 +156,16 @@ async def run_sync(notify=True):
         print(f"[sync] error: {e}")
         msg = f"⚠️ Ошибка при обновлении расписания: {esc(e)}"
     if notify:
-        await bot.send_message(OWNER_ID, msg)
+        await send_to_owners(msg)
     return msg
 
 
 # ---------- команды ----------
 @public.message(Command("start"))
 async def cmd_start(m: Message):
-    if OWNER_ID == 0:
-        await m.answer(f"Твой Telegram ID: <code>{m.from_user.id}</code>\nВпиши его в .env как OWNER_ID и перезапусти бота.")
-    elif m.from_user.id == OWNER_ID:
+    if not OWNER_IDS:
+        await m.answer(f"Твой Telegram ID: <code>{m.from_user.id}</code>\nВпиши его в .env как OWNER_IDS=... и перезапусти бота.")
+    elif m.from_user.id in OWNER_IDS:
         await m.answer(
             "Привет, Я Astro! Твой утренний помощник.\n\n"
             "/morning — утреннее сообщение прямо сейчас\n"
