@@ -180,7 +180,9 @@ async def cmd_start(m: Message):
             "/sync — обновить расписание с сайта (если задан SCHEDULE_URL)\n"
             "/settime 07:30 — время утреннего сообщения"
         )
-
+@public.message(Command("nikitos"))
+async def cmd_nikitos(m: Message):
+    await m.answer("Никитосик Хуесосик")
 
 @owner.message(Command("morning"))
 async def cmd_morning(m: Message):
