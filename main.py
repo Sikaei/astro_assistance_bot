@@ -23,7 +23,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"  # рядом с main.py, а не относительно текущей папки
-load_dotenv(ENV_PATH)  # файл называется .env, а не .env
+load_dotenv(ENV_PATH)
 if not os.getenv("BOT_TOKEN"):
     raise SystemExit(
         f"BOT_TOKEN не найден.\nИщу файл: {ENV_PATH} (существует: {ENV_PATH.exists()})\n"
@@ -38,14 +38,14 @@ import weather as weather_mod  # noqa: E402
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Считываем список ID (поддерживает и OWNER_IDS, и OWNER_ID через запятую)
+# Список ID, которым можно пользоваться ботом (OWNER_IDS=111,222,333 или OWNER_ID=...)
 raw_owner_ids = os.getenv("OWNER_IDS") or os.getenv("OWNER_ID", "")
 OWNER_IDS = [int(x.strip()) for x in raw_owner_ids.split(",") if x.strip().isdigit()]
 
 CITY = os.getenv("CITY", "Nanjing")
 TZ = ZoneInfo(os.getenv("TIMEZONE", "Asia/Shanghai"))
 DEFAULT_MORNING = os.getenv("MORNING_TIME", "07:00")
-SYNC_HOUR = int(os.getenv("SYNC_HOUR", "20"))  # воскресенье, 20:00
+SYNC_HOUR = int(os.getenv("SYNC_HOUR", "20"))  # воскресное напоминание про фото расписания
 
 WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 
@@ -62,7 +62,7 @@ dp = Dispatcher()
 scheduler = AsyncIOScheduler(timezone=TZ)
 
 public = Router()  # /start доступен всем, чтобы узнать свой ID
-owner = Router()  # всё остальное только владельцам
+owner = Router()  # всё остальное только тем, кто в списке OWNER_IDS
 
 # Фильтры доступа проверяют вхождение ID в список OWNER_IDS
 owner.message.filter(lambda m: bool(OWNER_IDS) and bool(m.from_user) and m.from_user.id in OWNER_IDS)
@@ -78,7 +78,7 @@ def esc(s) -> str:
 
 
 async def send_to_owners(text: str, reply_markup=None):
-    """Вспомогательная функция для безопасной рассылки сообщений всем владельцам."""
+    """Одинаковое сообщение всем из списка (используется для напоминания)."""
     for owner_id in OWNER_IDS:
         try:
             await bot.send_message(owner_id, text, reply_markup=reply_markup)
@@ -111,10 +111,23 @@ def tasks_keyboard(tasks, day: date):
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
-async def build_morning(day: date):
-    lessons = await db.get_lessons(day.isoformat())
-    tasks = await db.tasks_for_day(day.isoformat())
-    w = await weather_mod.get_weather(CITY, day, TZ)
+def delete_keyboard(tasks):
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"🗑 {'🔁' if t['type'] == 'daily' else '📌 ' + t['due_date'][5:]} {t['text'][:40]}",
+                callback_data=f"d:{t['id']}",
+            )
+        ]
+        for t in tasks
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def build_morning(chat_id: int, day: date, w):
+    """Утреннее сообщение конкретного человека: его пары и его задачи. Погода общая (w)."""
+    lessons = await db.get_lessons(chat_id, day.isoformat())
+    tasks = await db.tasks_for_day(chat_id, day.isoformat())
     w_str = weather_mod.weather_text(w)
     advice = await ai.get_advice(w, lessons, tasks, w_str)
 
@@ -129,35 +142,24 @@ async def build_morning(day: date):
 
 
 async def send_morning():
-    try:
-        text, kb = await build_morning(today())
-        await send_to_owners(text, reply_markup=kb)
-    except Exception as e:
-        print(f"[morning] error: {e}")
-        await send_to_owners(f"⚠️ Не удалось собрать утреннее сообщение: {esc(e)}")
+    day = today()
+    w = await weather_mod.get_weather(CITY, day, TZ)  # погоду берём один раз на всех
+    for uid in OWNER_IDS:
+        try:
+            text, kb = await build_morning(uid, day, w)
+            await bot.send_message(uid, text, reply_markup=kb)
+        except Exception as e:
+            print(f"[morning] {uid}: {e}")
+            try:
+                await bot.send_message(uid, f"⚠️ Не удалось собрать утреннее сообщение: {esc(e)}")
+            except Exception:
+                pass
 
 
 async def remind_schedule():
     await send_to_owners(
         "📸 Воскресенье! Пришли фото или скриншот расписания на следующую неделю, и я его загружу."
     )
-
-
-async def run_sync(notify=True):
-    try:
-        monday, sunday, lessons = await schedule_sync.sync_next_week(today())
-        msg = (
-            f"📅 <b>Расписание на {monday.strftime('%d.%m')}–{sunday.strftime('%d.%m')} обновлено</b> "
-            f"(найдено занятий: {len(lessons)})\n\n{lessons_text(lessons, with_date=True)}"
-        )
-    except schedule_sync.SyncError as e:
-        msg = f"⚠️ Не удалось обновить расписание: {esc(e)}"
-    except Exception as e:
-        print(f"[sync] error: {e}")
-        msg = f"⚠️ Ошибка при обновлении расписания: {esc(e)}"
-    if notify:
-        await send_to_owners(msg)
-    return msg
 
 
 # ---------- команды ----------
@@ -177,8 +179,12 @@ async def cmd_start(m: Message):
             "/tomorrow текст — задача на завтра\n"
             "/tasks — список задач и удаление\n"
             "📸 Пришли фото расписания — я загружу его на нужную неделю\n"
-            "/sync — обновить расписание с сайта (если задан SCHEDULE_URL)\n"
-            "/settime 07:30 — время утреннего сообщения"
+            "/settime 07:30 — время утреннего сообщения (общее для всех)"
+        )
+    else:
+        await m.answer(
+            f"Тебя нет в списке доступа. Твой Telegram ID: <code>{m.from_user.id}</code>\n"
+            "Отправь его владельцу бота, чтобы он тебя добавил."
         )
 @public.message(Command("nikitos"))
 async def cmd_nikitos(m: Message):
@@ -186,13 +192,15 @@ async def cmd_nikitos(m: Message):
 
 @owner.message(Command("morning"))
 async def cmd_morning(m: Message):
-    text, kb = await build_morning(today())
+    day = today()
+    w = await weather_mod.get_weather(CITY, day, TZ)
+    text, kb = await build_morning(m.from_user.id, day, w)
     await m.answer(text, reply_markup=kb)
 
 
 @owner.message(Command("schedule"))
 async def cmd_schedule(m: Message):
-    lessons = await db.get_lessons(today().isoformat())
+    lessons = await db.get_lessons(m.from_user.id, today().isoformat())
     await m.answer(f"📚 <b>Сегодня</b>\n{lessons_text(lessons)}")
 
 
@@ -200,7 +208,7 @@ async def cmd_schedule(m: Message):
 async def cmd_week(m: Message):
     d = today()
     monday = d - timedelta(days=d.weekday())
-    lessons = await db.get_lessons(monday.isoformat(), (monday + timedelta(days=6)).isoformat())
+    lessons = await db.get_lessons(m.from_user.id, monday.isoformat(), (monday + timedelta(days=6)).isoformat())
     await m.answer(f"📚 <b>Эта неделя</b>\n{lessons_text(lessons, with_date=True)}")
 
 
@@ -220,7 +228,7 @@ async def cmd_addlesson(m: Message, command: CommandObject):
             day = today() + timedelta(days=(wd - today().weekday()) % 7)  # ближайший такой день
     except ValueError:
         return await m.answer(usage)
-    await db.add_lesson(day.isoformat(), start.zfill(5), end.zfill(5) if end else None, title, place or None)
+    await db.add_lesson(m.from_user.id, day.isoformat(), start.zfill(5), end.zfill(5) if end else None, title, place or None)
     await m.answer(f"✅ Добавлено: {WEEKDAYS[day.weekday()]} {day.strftime('%d.%m')} {start} {esc(title)}")
 
 
@@ -228,7 +236,7 @@ async def _add_task(m: Message, command: CommandObject, type_, due, ok_text):
     text = (command.args or "").strip()
     if not text:
         return await m.answer("Напиши текст после команды, например: <code>/daily читать 30 минут</code>")
-    await db.add_task(text, type_, due.isoformat() if due else None)
+    await db.add_task(m.from_user.id, text, type_, due.isoformat() if due else None)
     await m.answer(f"{ok_text}: {esc(text)}")
 
 
@@ -249,25 +257,10 @@ async def cmd_tomorrow(m: Message, command: CommandObject):
 
 @owner.message(Command("tasks"))
 async def cmd_tasks(m: Message):
-    tasks = await db.list_active_tasks()
+    tasks = await db.list_active_tasks(m.from_user.id)
     if not tasks:
         return await m.answer("Задач нет. Добавь через /daily или /today")
-    rows = [
-        [
-            InlineKeyboardButton(
-                text=f"🗑 {'🔁' if t['type'] == 'daily' else '📌 ' + t['due_date'][5:]} {t['text'][:40]}",
-                callback_data=f"d:{t['id']}",
-            )
-        ]
-        for t in tasks
-    ]
-    await m.answer("Нажми на задачу, чтобы удалить:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-
-
-@owner.message(Command("sync"))
-async def cmd_sync(m: Message):
-    await m.answer("Загружаю расписание с сайта…")
-    await run_sync()
+    await m.answer("Нажми на задачу, чтобы удалить:", reply_markup=delete_keyboard(tasks))
 
 
 @owner.message(Command("settime"))
@@ -278,11 +271,11 @@ async def cmd_settime(m: Message, command: CommandObject):
     h, mi = int(mt.group(1)), int(mt.group(2))
     await db.set_setting("morning_time", f"{h:02d}:{mi:02d}")
     scheduler.reschedule_job("morning", trigger="cron", hour=h, minute=mi)
-    await m.answer(f"⏰ Утреннее сообщение теперь в {h:02d}:{mi:02d}")
+    await m.answer(f"⏰ Утреннее сообщение (для всех) теперь в {h:02d}:{mi:02d}")
 
 
 # ---------- расписание с фото ----------
-pending = {}  # id сообщения-статуса -> (monday, sunday, lessons)
+pending = {}  # (chat_id, id сообщения-статуса) -> (monday, sunday, lessons)
 
 
 def target_week(caption):
@@ -321,7 +314,7 @@ async def on_schedule_photo(m: Message):
         return await status.edit_text(
             "Не нашёл занятий на этой неделе. Попробуй сфотографировать ровнее и крупнее или пришли файлом."
         )
-    pending[status.message_id] = (monday, sunday, lessons)
+    pending[(m.from_user.id, status.message_id)] = (monday, sunday, lessons)
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -339,12 +332,12 @@ async def on_schedule_photo(m: Message):
 
 @owner.callback_query(F.data.startswith("ls:"))
 async def cb_save_lessons(c: CallbackQuery):
-    data = pending.pop(int(c.data.split(":")[1]), None)
+    data = pending.pop((c.from_user.id, int(c.data.split(":")[1])), None)
     if not data:
         await c.answer("Устарело, пришли фото ещё раз", show_alert=True)
         return
     monday, sunday, lessons = data
-    await db.replace_site_lessons(monday.isoformat(), sunday.isoformat(), lessons)
+    await db.replace_site_lessons(c.from_user.id, monday.isoformat(), sunday.isoformat(), lessons)
     await c.message.edit_text(
         f"✅ Расписание на {monday.strftime('%d.%m')}–{sunday.strftime('%d.%m')} сохранено "
         f"({len(lessons)} занятий).\n\n{lessons_text(lessons, with_date=True)}"
@@ -354,7 +347,7 @@ async def cb_save_lessons(c: CallbackQuery):
 
 @owner.callback_query(F.data.startswith("lc:"))
 async def cb_cancel_lessons(c: CallbackQuery):
-    pending.pop(int(c.data.split(":")[1]), None)
+    pending.pop((c.from_user.id, int(c.data.split(":")[1])), None)
     await c.message.edit_text("Отменено. Можешь прислать другое фото.")
     await c.answer()
 
@@ -363,11 +356,11 @@ async def cb_cancel_lessons(c: CallbackQuery):
 @owner.callback_query(F.data.startswith("t:"))
 async def cb_toggle(c: CallbackQuery):
     _, task_id, day_s = c.data.split(":")
-    await db.toggle_task(int(task_id), day_s)
-    tasks = await db.tasks_for_day(day_s)
-    kb = tasks_keyboard(tasks, date.fromisoformat(day_s))
+    if await db.toggle_task(c.from_user.id, int(task_id), day_s) is None:
+        return await c.answer("Задача не найдена", show_alert=True)
+    tasks = await db.tasks_for_day(c.from_user.id, day_s)
     try:
-        await c.message.edit_reply_markup(reply_markup=kb)
+        await c.message.edit_reply_markup(reply_markup=tasks_keyboard(tasks, date.fromisoformat(day_s)))
     except Exception:
         pass  # сообщение не изменилось
     await c.answer()
@@ -375,26 +368,17 @@ async def cb_toggle(c: CallbackQuery):
 
 @owner.callback_query(F.data.startswith("d:"))
 async def cb_delete(c: CallbackQuery):
-    await db.delete_task(int(c.data.split(":")[1]))
-    tasks = await db.list_active_tasks()
-    rows = [
-        [
-            InlineKeyboardButton(
-                text=f"🗑 {'🔁' if t['type'] == 'daily' else '📌 ' + t['due_date'][5:]} {t['text'][:40]}",
-                callback_data=f"d:{t['id']}",
-            )
-        ]
-        for t in tasks
-    ]
-    await c.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await db.delete_task(c.from_user.id, int(c.data.split(":")[1]))
+    tasks = await db.list_active_tasks(c.from_user.id)
+    await c.message.edit_reply_markup(reply_markup=delete_keyboard(tasks))
     await c.answer("Удалено")
 
 
 # ---------- запуск ----------
 async def main():
-    if not BOT_TOKEN:
-        raise SystemExit("BOT_TOKEN не найден. Проверь .env")
     await db.init_db()
+    if OWNER_IDS:  # старые данные (до разделения по людям) достаются первому из списка
+        await db.assign_legacy(OWNER_IDS[0])
 
     morning = await db.get_setting("morning_time", DEFAULT_MORNING)
     h, mi = map(int, morning.split(":"))
@@ -414,7 +398,6 @@ async def main():
             BotCommand(command="today", description="Задача на сегодня"),
             BotCommand(command="tomorrow", description="Задача на завтра"),
             BotCommand(command="tasks", description="Список задач"),
-            BotCommand(command="sync", description="Обновить расписание с сайта"),
             BotCommand(command="settime", description="Время утреннего сообщения"),
         ]
     )
