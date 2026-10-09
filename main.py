@@ -98,7 +98,11 @@ def lessons_text(lessons, with_date=False):
         if with_date:
             d = date.fromisoformat(l["date"])
             prefix = f"<b>{WEEKDAYS[d.weekday()]} {d.strftime('%d.%m')}</b> "
-        lines.append(f"🕘 {prefix}{t} {esc(l['title'])}{place}")
+        time_fmt = f"<code>{t}</code>"
+        title_fmt = f"<b>{esc(l['title'])}</b>"
+        place_fmt = f"📍 <i>{esc(l['place'])}</i>" if l.get("place") else ""
+
+        lines.append(f"🔹 {prefix}{time_fmt} — {title_fmt} {place_fmt}".strip())
     return "\n".join(lines)
 
 
@@ -401,7 +405,7 @@ async def main():
             BotCommand(command="settime", description="Время утреннего сообщения"),
         ]
     )
-    print("Бот запущен")
+    print("Готов к бою")
     await dp.start_polling(bot)
 
 
