@@ -94,8 +94,34 @@ async def _run(fn):
 
 
 async def init_db():
+    """Создаёт таблицы. Если в базе остались таблицы от старой версии (другие колонки), их можно один раз
+    сбросить: задай на хостинге переменную RESET_DB=1. Повторно сброс не сработает, пока значение то же
+    (чтобы снова сбросить, поменяй значение, например на 2). Все данные в таблицах бота при сбросе удаляются."""
+    reset = (os.getenv("RESET_DB") or "").strip()
+
     async def f(con):
-        await con.execute(SCHEMA)
+        if reset:
+            try:
+                done = await con.fetchval("SELECT value FROM settings WHERE key='reset_token'")
+            except asyncpg.UndefinedTableError:
+                done = None
+            if done != reset:
+                print("[db] RESET_DB: удаляю старые таблицы бота и создаю заново")
+                await con.execute("DROP TABLE IF EXISTS task_log, tasks, lessons, settings CASCADE")
+        try:
+            await con.execute(SCHEMA)
+        except (asyncpg.UndefinedColumnError, asyncpg.DatatypeMismatchError, asyncpg.UndefinedTableError) as e:
+            raise RuntimeError(
+                f"В базе лежат таблицы от старой версии бота ({e}). "
+                "Добавь на хостинге переменную окружения RESET_DB=1 и перезапусти бота: "
+                "таблицы пересоздадутся (старые данные в них будут удалены)."
+            )
+        if reset:
+            await con.execute(
+                "INSERT INTO settings(key, value) VALUES ('reset_token', $1) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                reset,
+            )
 
     await _run(f)
 
