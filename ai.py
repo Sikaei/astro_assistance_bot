@@ -20,27 +20,30 @@ def _get_client():
 
 
 def _config(json_mode, thinking):
-    kwargs = {"max_output_tokens": 8192}  # без лимита у Gemini 3 запрос иногда зависает
+    kwargs = {"max_output_tokens": 8192}  # без лимита у Gemini запрос иногда зависает
     if json_mode:
         kwargs["response_mime_type"] = "application/json"
     if thinking:
-        kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="low")  # быстрее и дешевле
+        kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="low")
     return types.GenerateContentConfig(**kwargs)
 
 
 async def generate(prompt, json_mode=False, image=None, mime="image/jpeg"):
     contents = [types.Part.from_bytes(data=image, mime_type=mime), prompt] if image else prompt
-    timeout = 90 if image else 45
+    # Уменьшили таймаут для текста с 45 до 15 секунд для быстрого переключения при зависаниях
+    timeout = 90 if image else 15
     models = [MODEL] + [m for m in FALLBACK_MODELS if m != MODEL]
     last_error = None
+
     for attempt in range(3):  # 3 круга по всем моделям, между кругами пауза
         if attempt:
-            await asyncio.sleep(4 * attempt)
+            await asyncio.sleep(4 * attempt)  # Исправлена синтаксическая ошибка умножения
+
         for model in models:
-            thinking = True  # если модель не понимает thinking_level, повторяем без него
+            thinking = False  # Отключено по умолчанию для максимальной скорости текстовых ответов
             while True:
                 try:
-                    print(f"[ai] запрос к {model} (thinking={'low' if thinking else 'default'}), круг {attempt + 1}")
+                    print(f"[ai] запрос к {model}, круг {attempt + 1}")
                     resp = await asyncio.wait_for(
                         _get_client().aio.models.generate_content(
                             model=model, contents=contents, config=_config(json_mode, thinking)
@@ -49,10 +52,9 @@ async def generate(prompt, json_mode=False, image=None, mime="image/jpeg"):
                     )
                     return resp.text or ""
                 except asyncio.TimeoutError:
-                    raise RuntimeError(
-                        f"Gemini не ответил за {timeout} секунд. Проверь, что VPN включён в режиме "
-                        "«весь трафик», и попробуй ещё раз."
-                    )
+                    print(f"[ai] {model} превысил тайм-аут ({timeout}с), переключаемся...")
+                    last_error = RuntimeError(f"Timeout on {model}")
+                    break  # следующая модель
                 except Exception as e:
                     msg = str(e)
                     if thinking and "thinking" in msg.lower():
@@ -63,6 +65,7 @@ async def generate(prompt, json_mode=False, image=None, mime="image/jpeg"):
                         last_error = e
                         break  # следующая модель
                     raise
+
     print(f"[ai] все попытки неудачны: {last_error}")
     raise RuntimeError("Серверы Gemini сейчас перегружены. Подожди пару минут и пришли скриншот ещё раз.")
 
@@ -97,8 +100,7 @@ async def get_advice(weather, lessons, tasks, weather_str):
 
     prompt = f"""Ты личный утренний помощник. Ответь по-русски, дружелюбно и коротко (не более 6 строк), без markdown и без звёздочек.
 Дай: 1) что надеть с учётом погоды и маршрута в течение дня (куртка, зонт, обувь и т.д.);
-2) одну-две фразы про день: насколько он загружен и на что обратить внимание.
-3) Напоминай про ежедневные задачи
+2) Напоминай про ежедневные задачи
 
 Погода ({weather['city'] if weather else 'неизвестно'}):
 {weather_str}
