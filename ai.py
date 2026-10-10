@@ -4,9 +4,9 @@ import os
 from google import genai
 from google.genai import types
 
-MODEL = os.getenv("GEMINI_MODEL") or "gemini-3.8-flash"
-# Если Google закроет модель (ошибка 404), бот сам попробует запасные
-FALLBACK_MODELS = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-flash-latest"]
+MODEL = os.getenv("GEMINI_MODEL") or "gemini-3.5-flash"
+# Если модель недоступна (404) или отвечает пусто, бот сам пробует запасные
+FALLBACK_MODELS = ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"]
 # Ошибки, при которых стоит повторить или попробовать другую модель
 RETRYABLE = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500", "INTERNAL", "404", "NOT_FOUND")
 _client = None
@@ -19,8 +19,10 @@ def _get_client():
     return _client
 
 
-def _config(json_mode, thinking):
-    kwargs = {"max_output_tokens": 8192}  # без лимита у Gemini запрос иногда зависает
+def _config(json_mode, thinking, big):
+    # Токены "размышления" Gemini 3 входят в max_output_tokens. Если не ограничить размышление,
+    # оно может съесть весь лимит, и ответ придёт пустым или обрезанным (особенно с картинкой).
+    kwargs = {"max_output_tokens": 16384 if big else 8192}
     if json_mode:
         kwargs["response_mime_type"] = "application/json"
     if thinking:
@@ -28,32 +30,44 @@ def _config(json_mode, thinking):
     return types.GenerateContentConfig(**kwargs)
 
 
+def _finish_reason(resp):
+    try:
+        return resp.candidates[0].finish_reason
+    except Exception:
+        return "unknown"
+
+
 async def generate(prompt, json_mode=False, image=None, mime="image/jpeg"):
     contents = [types.Part.from_bytes(data=image, mime_type=mime), prompt] if image else prompt
-    # Уменьшили таймаут для текста с 45 до 15 секунд для быстрого переключения при зависаниях
-    timeout = 90 if image else 15
+    timeout = 90 if image else 20
     models = [MODEL] + [m for m in FALLBACK_MODELS if m != MODEL]
     last_error = None
 
     for attempt in range(3):  # 3 круга по всем моделям, между кругами пауза
         if attempt:
-            await asyncio.sleep(4 * attempt)  # Исправлена синтаксическая ошибка умножения
+            await asyncio.sleep(4 * attempt)
 
         for model in models:
-            thinking = False  # Отключено по умолчанию для максимальной скорости текстовых ответов
+            thinking = True  # низкий уровень размышления; если модель его не поддерживает, отключим ниже
             while True:
                 try:
                     print(f"[ai] запрос к {model}, круг {attempt + 1}")
                     resp = await asyncio.wait_for(
                         _get_client().aio.models.generate_content(
-                            model=model, contents=contents, config=_config(json_mode, thinking)
+                            model=model, contents=contents, config=_config(json_mode, thinking, bool(image))
                         ),
                         timeout,
                     )
-                    return resp.text or ""
+                    text = resp.text or ""
+                    if text.strip():
+                        return text
+                    reason = _finish_reason(resp)
+                    print(f"[ai] {model}: пустой ответ (finish_reason={reason})")
+                    last_error = RuntimeError(f"пустой ответ от {model} ({reason})")
+                    break  # следующая модель
                 except asyncio.TimeoutError:
                     print(f"[ai] {model} превысил тайм-аут ({timeout}с), переключаемся...")
-                    last_error = RuntimeError(f"Timeout on {model}")
+                    last_error = RuntimeError(f"тайм-аут {model}")
                     break  # следующая модель
                 except Exception as e:
                     msg = str(e)
@@ -67,7 +81,7 @@ async def generate(prompt, json_mode=False, image=None, mime="image/jpeg"):
                     raise
 
     print(f"[ai] все попытки неудачны: {last_error}")
-    raise RuntimeError("Серверы Gemini сейчас перегружены. Подожди пару минут и пришли скриншот ещё раз.")
+    raise RuntimeError(f"Gemini не смог обработать запрос ({str(last_error)[:150]}). Попробуй ещё раз чуть позже.")
 
 
 def _fallback_advice(w):
@@ -83,7 +97,7 @@ def _fallback_advice(w):
     elif t < 24:
         tips.append("лёгкая кофта или рубашка")
     else:
-        tips.append("Блять ебаный Gemini недоступен")
+        tips.append("лёгкая одежда, футболка")
     if w["pop_max"] >= 40:
         tips.append("возьми зонт")
     if w["wind_max"] >= 8:
