@@ -26,12 +26,6 @@ from dotenv import load_dotenv
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"  # рядом с main.py, а не относительно текущей папки
 load_dotenv(ENV_PATH)
-if not os.getenv("BOT_TOKEN"):
-    raise SystemExit(
-        f"BOT_TOKEN не найден.\nИщу файл: {ENV_PATH} (существует: {ENV_PATH.exists()})\n"
-        "Проверь, что файл называется именно .env (не .env.txt) "
-        "и в нём есть строка BOT_TOKEN=... без пробелов и кавычек."
-    )
 
 import ai  # noqa: E402  (после load_dotenv, чтобы подхватить GEMINI_MODEL)
 import database as db  # noqa: E402

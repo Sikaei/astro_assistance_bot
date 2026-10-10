@@ -83,28 +83,6 @@ async def generate(prompt, json_mode=False, image=None, mime="image/jpeg"):
     print(f"[ai] все попытки неудачны: {last_error}")
     raise RuntimeError(f"Gemini не смог обработать запрос ({str(last_error)[:150]}). Попробуй ещё раз чуть позже.")
 
-
-def _fallback_advice(w):
-    """Простое правило, если Gemini недоступен."""
-    if not w:
-        return "Погоду узнать не удалось, посмотри в окно перед выходом."
-    tips = []
-    t = w["tmax"]
-    if t < 5:
-        tips.append("тёплая куртка, шапка, перчатки")
-    elif t < 15:
-        tips.append("куртка или худи с курткой")
-    elif t < 24:
-        tips.append("лёгкая кофта или рубашка")
-    else:
-        tips.append("лёгкая одежда, футболка")
-    if w["pop_max"] >= 40:
-        tips.append("возьми зонт")
-    if w["wind_max"] >= 8:
-        tips.append("будет ветрено")
-    return "Совет: " + ", ".join(tips) + "."
-
-
 async def get_advice(weather, lessons, tasks, weather_str):
     lessons_str = "\n".join(
         f"- {l['start']}-{l.get('end') or '?'} {l['title']} ({l.get('place') or 'место не указано'})"
@@ -127,7 +105,7 @@ async def get_advice(weather, lessons, tasks, weather_str):
 """
     try:
         text = (await generate(prompt)).strip()
-        return text or _fallback_advice(weather)
+        return text
     except Exception as e:
         print(f"[ai] error: {e}")
-        return _fallback_advice(weather)
+        return "Gemini не отвечает"

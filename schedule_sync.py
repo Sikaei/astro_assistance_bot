@@ -4,7 +4,7 @@ import re
 from datetime import date, timedelta
 from html.parser import HTMLParser
 
-import aiohttp
+
 
 import ai
 import database as db
@@ -174,6 +174,9 @@ async def extract_lessons_from_image(image, mime, monday, sunday):
 """
     raw = await ai.generate(prompt, json_mode=True, image=image, mime=mime)
     return _parse_lessons(raw, monday, sunday)
+
+
+
 
 
 async def sync_next_week(today):
